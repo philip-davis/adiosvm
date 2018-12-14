@@ -15,6 +15,7 @@
 #include <thread>
 #include <cassert>
 #include "adios2.h"
+#include "decompose_utils.h"
 
 #include <mpi.h>
 #include <fftw3-mpi.h>
@@ -65,14 +66,14 @@ int main(int argc, char *argv[])
 
     std::string in_filename;
     std::string out_filename;
-    bool write_norms_only = true;
+    bool output_fft_only = true;
     in_filename = argv[1];
     out_filename = argv[2];
     if (argc >= 4)
     {
-        std::string out_norms_only = argv[3];
-        if (out_norms_only.compare("0") == 0)
-            write_norms_only = false;
+        std::string out_fft_only_str = argv[3];
+        if (out_fft_only_str.compare("0") == 0)
+            output_fft_only = false;
     }
 
 
@@ -93,11 +94,16 @@ int main(int argc, char *argv[])
 
     std::vector<double> u_fft_real;
     std::vector<double> u_fft_imag;
+    std::vector<double> v_fft_real;
+    std::vector<double> v_fft_imag;
     
     // adios2 variable declarations
     adios2::Variable<double> var_u_real_in, var_u_imag_in, var_v_real_in, var_v_imag_in;
-    adios2::Variable<double> var_u_fft_real, var_u_fft_imag;
+    adios2::Variable<double> var_u_fft_real, var_u_fft_imag, var_v_fft_real, var_v_fft_imag;
     adios2::Variable<double> var_u_real_out, var_u_imag_out, var_v_real_out, var_v_imag_out;
+
+    // staring offsets and counts
+    std::size_t starts_u[3], starts_v[3], counts_u[3], counts_v[3];
 
     // adios2 io object and engine init
     adios2::ADIOS ad ("adios2_config.xml", comm, adios2::DebugON);
@@ -144,18 +150,39 @@ int main(int argc, char *argv[])
         shape_v_real = var_v_real_in.Shape();
         shape_v_imag = var_v_imag_in.Shape();
 
-        // Calculate global and local sizes of U and V
-        u_global_size = shape_u_real[0] * shape_u_real[1] * shape_u_real[2];
-        u_local_size  = u_global_size/comm_size;
-        v_global_size = shape_v_real[0] * shape_v_real[1] * shape_v_real[2];
-        v_local_size  = v_global_size/comm_size;
+        // Get the starting offsets and counts for set_selection and define_var calls
+        get_starts_counts_3d_decomp (shape_u_real[0], shape_u_real[1], shape_u_real[2], starts_u, counts_u, comm_size, rank);
+        get_starts_counts_3d_decomp (shape_v_real[0], shape_v_real[1], shape_v_real[2], starts_v, counts_v, comm_size, rank);
+
+        // Set selection
+        var_u_real_in.SetSelection(adios2::Box<adios2::Dims>(
+                    {starts_u[0], starts_u[1], starts_u[2]},
+                    {counts_u[0], counts_u[1], counts_u[2]}));
+        var_u_imag_in.SetSelection(adios2::Box<adios2::Dims>(
+                    {starts_u[0], starts_u[1], starts_u[2]},
+                    {counts_u[0], counts_u[1], counts_u[2]}));
+        var_v_real_in.SetSelection(adios2::Box<adios2::Dims>(
+                    {starts_v[0], starts_v[1], starts_v[2]},
+                    {counts_v[0], counts_v[1], counts_v[2]}));
+        var_v_imag_in.SetSelection(adios2::Box<adios2::Dims>(
+                    {starts_v[0], starts_v[1], starts_v[2]},
+                    {counts_v[0], counts_v[1], counts_v[2]}));
 
         // Declare variables to output
         if (firstStep) {
             alloc_local = fftw_mpi_local_size_3d(shape_u_real[0], shape_u_real[1], shape_u_real[2], 
                                                 MPI_COMM_WORLD, &local_n0, &local_0_start);
+
             in = fftw_alloc_complex(alloc_local);
             out = fftw_alloc_complex(alloc_local);
+
+            printf("shape u %ld\n", shape_u_real[0]);
+
+            if (alloc_local != ((shape_u_real[0]*shape_u_real[1]*shape_u_real[2])/comm_size)) {
+                fprintf(stderr, "ERROR: fftw local buffer size %lu != local buffer size determined by decomposition."
+                                " Exiting.\n", alloc_local);
+                //MPI_Abort(MPI_COMM_WORLD, err);
+            }
 
             if ((NULL == in) or (NULL == out)) {
                 std::cout << "FATAL ERROR: Could not allocate memory for fftw arrays. Exiting ..";
@@ -164,6 +191,8 @@ int main(int argc, char *argv[])
 
             u_fft_real.reserve(alloc_local);
             u_fft_imag.reserve(alloc_local);
+            v_fft_real.reserve(alloc_local);
+            v_fft_imag.reserve(alloc_local);
 
             plan = fftw_mpi_plan_dft_3d(shape_u_real[0], shape_u_real[1], shape_u_real[2], 
                                         in, out, MPI_COMM_WORLD, FFTW_FORWARD, FFTW_ESTIMATE);
@@ -182,7 +211,16 @@ int main(int argc, char *argv[])
                     { x_off*shape_u_real[1]*shape_u_real[2] },
                     { (size_t)alloc_local } );
 
-            if ( !write_norms_only) {
+            var_v_fft_real = writer_io.DefineVariable<double> ("v_fft_real",
+                    { shape_u_real[0]*shape_u_real[1]*shape_u_real[2] },
+                    { x_off*shape_u_real[1]*shape_u_real[2] },
+                    { (size_t)alloc_local } );
+            var_v_fft_imag = writer_io.DefineVariable<double> ("v_fft_imag",
+                    { shape_u_real[0]*shape_u_real[1]*shape_u_real[2] },
+                    { x_off*shape_u_real[1]*shape_u_real[2] },
+                    { (size_t)alloc_local } );
+
+            if ( !output_fft_only) {
                 var_u_real_out = writer_io.DefineVariable<double> ("u_real",
                         { shape_u_real[0], shape_u_real[1], shape_u_real[2] },
                         { x_off, 0, 0 },
@@ -204,7 +242,7 @@ int main(int argc, char *argv[])
         }
 
         // Set selection
-        var_u_real_in.SetSelection(adios2::Box<adios2::Dims>(
+        /*var_u_real_in.SetSelection(adios2::Box<adios2::Dims>(
                     {x_off,0,0},
                     {x_dim, shape_u_real[1], shape_u_real[2]}));
         var_u_imag_in.SetSelection(adios2::Box<adios2::Dims>(
@@ -216,6 +254,7 @@ int main(int argc, char *argv[])
         var_v_imag_in.SetSelection(adios2::Box<adios2::Dims>(
                     {x_off,0,0},
                     {x_dim, shape_u_real[1], shape_u_real[2]}));
+        */
 
         // Read adios2 data
         reader_engine.Get<double>(var_u_real_in, u_real_data);
@@ -226,6 +265,7 @@ int main(int argc, char *argv[])
         // End adios2 step
         reader_engine.EndStep();
 
+        // FFT for u
         // Input to FFTW
         for (int i = 0; i < x_dim; i++)
         {
@@ -250,11 +290,38 @@ int main(int argc, char *argv[])
             u_fft_imag[i] = out[i][1];
         }
 
+        // FFT for v
+        // Input to FFTW
+        for (int i = 0; i < x_dim; i++)
+        {
+            for (int j = 0; j < shape_u_real[1]; j++)
+            {
+                for (int k = 0; k < shape_u_real[2]; k++)
+                {
+                    size_t idx = i*shape_u_real[1]*shape_u_real[2] + j*shape_u_real[2] + k;
+                    in[idx][0] = v_real_data[idx];
+                    in[idx][1] = v_imag_data[idx];
+                }
+            }
+        }
+
+        // Do a fourier transform
+        fftw_execute(plan);
+
+        // Output
+        for (size_t i = 0; i < alloc_local; i++)
+        {
+            v_fft_real[i] = out[i][0];
+            v_fft_imag[i] = out[i][1];
+        }
+
         // write U, V, and their norms out
         writer_engine.BeginStep ();
         writer_engine.Put<double> (var_u_fft_real, u_fft_real.data());
         writer_engine.Put<double> (var_u_fft_imag, u_fft_imag.data());
-        if (!write_norms_only) {
+        writer_engine.Put<double> (var_v_fft_real, v_fft_real.data());
+        writer_engine.Put<double> (var_v_fft_imag, v_fft_imag.data());
+        if (!output_fft_only) {
             writer_engine.Put<double> (var_u_real_out, u_real_data.data());
             writer_engine.Put<double> (var_u_imag_out, u_imag_data.data());
             writer_engine.Put<double> (var_v_real_out, v_real_data.data());

@@ -14,6 +14,7 @@
 #include <cmath>
 #include <thread>
 #include "adios2.h"
+#include "decompose_utils.h"
 
 /*
  * Function to compute the norm of a vector
@@ -81,10 +82,6 @@ int main(int argc, char *argv[])
             write_norms_only = false;
     }
 
-
-    std::size_t u_global_size, v_global_size;
-    std::size_t u_local_size, v_local_size;
-    
     bool firstStep = true;
 
     std::vector<std::size_t> shape_u_real;
@@ -104,6 +101,9 @@ int main(int argc, char *argv[])
     adios2::Variable<double> var_u_real_in, var_u_imag_in, var_v_real_in, var_v_imag_in;
     adios2::Variable<double> var_u_norm, var_v_norm;
     adios2::Variable<double> var_u_real_out, var_u_imag_out, var_v_real_out, var_v_imag_out;
+
+    // staring offsets and counts
+    std::size_t starts_u[3], starts_v[3], counts_u[3], counts_v[3];
 
     // adios2 io object and engine init
     adios2::ADIOS ad ("adios2_config.xml", comm, adios2::DebugON);
@@ -150,54 +150,52 @@ int main(int argc, char *argv[])
         shape_v_real = var_v_real_in.Shape();
         shape_v_imag = var_v_imag_in.Shape();
 
-        // Calculate global and local sizes of U and V
-        u_global_size = shape_u_real[0] * shape_u_real[1] * shape_u_real[2];
-        u_local_size  = u_global_size/comm_size;
-        v_global_size = shape_v_real[0] * shape_v_real[1] * shape_v_real[2];
-        v_local_size  = v_global_size/comm_size;
+        // Get the starting offsets and counts for set_selection and define_var calls
+        get_starts_counts_3d_decomp (shape_u_real[0], shape_u_real[1], shape_u_real[2], starts_u, counts_u, comm_size, rank);
+        get_starts_counts_3d_decomp (shape_v_real[0], shape_v_real[1], shape_v_real[2], starts_v, counts_v, comm_size, rank);
 
         // Set selection
         var_u_real_in.SetSelection(adios2::Box<adios2::Dims>(
-                    {shape_u_real[0]/comm_size*rank,0,0},
-                    {shape_u_real[0]/comm_size, shape_u_real[1], shape_u_real[2]}));
+                    {starts_u[0], starts_u[1], starts_u[2]},
+                    {counts_u[0], counts_u[1], counts_u[2]}));
         var_u_imag_in.SetSelection(adios2::Box<adios2::Dims>(
-                    {shape_u_imag[0]/comm_size*rank,0,0},
-                    {shape_u_imag[0]/comm_size, shape_u_imag[1], shape_u_imag[2]}));
+                    {starts_u[0], starts_u[1], starts_u[2]},
+                    {counts_u[0], counts_u[1], counts_u[2]}));
         var_v_real_in.SetSelection(adios2::Box<adios2::Dims>(
-                    {shape_v_real[0]/comm_size*rank,0,0},
-                    {shape_v_real[0]/comm_size, shape_v_real[1], shape_v_real[2]}));
+                    {starts_v[0], starts_v[1], starts_v[2]},
+                    {counts_v[0], counts_v[1], counts_v[2]}));
         var_v_imag_in.SetSelection(adios2::Box<adios2::Dims>(
-                    {shape_v_imag[0]/comm_size*rank,0,0},
-                    {shape_v_imag[0]/comm_size, shape_v_imag[1], shape_v_imag[2]}));
+                    {starts_v[0], starts_v[1], starts_v[2]},
+                    {counts_v[0], counts_v[1], counts_v[2]}));
 
         // Declare variables to output
         if (firstStep) {
             var_u_norm = writer_io.DefineVariable<double> ("u_norm",
                     { shape_u_real[0], shape_u_real[1], shape_u_real[2] },
-                    { shape_u_real[0]/comm_size * rank, 0, 0 },
-                    { shape_u_real[0]/comm_size, shape_u_real[1], shape_u_real[2] } );
+                    { starts_u[0], starts_u[1], starts_u[2] },
+                    { counts_u[0], counts_u[1], counts_u[2] } );
             var_v_norm = writer_io.DefineVariable<double> ("v_norm",
                     { shape_v_real[0], shape_v_real[1], shape_v_real[2] },
-                    { shape_v_real[0]/comm_size * rank, 0, 0 },
-                    { shape_v_real[0]/comm_size, shape_v_real[1], shape_v_real[2] } );
+                    { starts_v[0], starts_v[1], starts_v[2] },
+                    { counts_v[0], counts_v[1], counts_v[2] } );
 
             if ( !write_norms_only) {
                 var_u_real_out = writer_io.DefineVariable<double> ("u_real",
                         { shape_u_real[0], shape_u_real[1], shape_u_real[2] },
-                        { shape_u_real[0]/comm_size * rank, 0, 0 },
-                        { shape_u_real[0]/comm_size, shape_u_real[1], shape_u_real[2] } );
+                        { starts_u[0], starts_u[1], starts_u[2] },
+                        { counts_u[0], counts_u[1], counts_u[2] } );
                 var_u_imag_out = writer_io.DefineVariable<double> ("u_imag",
                         { shape_u_real[0], shape_u_real[1], shape_u_real[2] },
-                        { shape_u_real[0]/comm_size * rank, 0, 0 },
-                        { shape_u_real[0]/comm_size, shape_u_real[1], shape_u_real[2] } );
+                        { starts_u[0], starts_u[1], starts_u[2] },
+                        { counts_u[0], counts_u[1], counts_u[2] } );
                 var_v_real_out = writer_io.DefineVariable<double> ("v_real",
                         { shape_v_real[0], shape_v_real[1], shape_v_real[2] },
-                        { shape_v_real[0]/comm_size * rank, 0, 0 },
-                        { shape_v_real[0]/comm_size, shape_v_real[1], shape_v_real[2] } );
+                        { starts_v[0], starts_v[1], starts_v[2] },
+                        { counts_v[0], counts_v[1], counts_v[2] } );
                 var_v_imag_out = writer_io.DefineVariable<double> ("v_imag",
                         { shape_v_real[0], shape_v_real[1], shape_v_real[2] },
-                        { shape_v_real[0]/comm_size * rank, 0, 0 },
-                        { shape_v_real[0]/comm_size, shape_v_real[1], shape_v_real[2] } );
+                        { starts_v[0], starts_v[1], starts_v[2] },
+                        { counts_v[0], counts_v[1], counts_v[2] } );
             }
             firstStep = false;
         }
